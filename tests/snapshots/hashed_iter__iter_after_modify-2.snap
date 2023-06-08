@@ -1,0 +1,35 @@
+---
+source: tests/hashed_iter.rs
+expression: map._store
+---
+{
+    0: Order {
+        order_id: 5,
+        timestamp: 111,
+        trader_name: {
+            "John",
+        },
+    },
+    1: Order {
+        order_id: 2,
+        timestamp: 22,
+        trader_name: {
+            "Mike",
+        },
+    },
+    2: Order {
+        order_id: 5,
+        timestamp: 33,
+        trader_name: {
+            "John",
+            "Tom",
+        },
+    },
+    3: Order {
+        order_id: 4,
+        timestamp: 44,
+        trader_name: {
+            "Jerry",
+        },
+    },
+}

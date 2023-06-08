@@ -1,0 +1,9 @@
+---
+source: tests/hashed_iter_insert_remove.rs
+expression: order_map._trader_name_index
+---
+{
+    "Bob": {
+        1,
+    },
+}

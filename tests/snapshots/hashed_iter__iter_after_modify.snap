@@ -1,0 +1,19 @@
+---
+source: tests/hashed_iter.rs
+expression: map._trader_name_index
+---
+{
+    "Tom": {
+        2,
+    },
+    "Jerry": {
+        3,
+    },
+    "John": {
+        0,
+        2,
+    },
+    "Mike": {
+        1,
+    },
+}
