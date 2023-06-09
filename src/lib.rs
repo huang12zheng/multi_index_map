@@ -1,7 +1,10 @@
+mod extra_fields;
+
 use convert_case::Casing;
+use extra_fields::IntoExtraFiled;
 use proc_macro_error::{abort_call_site, proc_macro_error};
-use quote::{format_ident, quote};
-use syn::{parse_macro_input, DeriveInput};
+use quote::{format_ident, quote, ToTokens};
+use syn::{parse_macro_input, DeriveInput, Field};
 
 #[proc_macro_derive(MultiIndexMap, attributes(multi_index))]
 #[proc_macro_error]
@@ -15,6 +18,13 @@ pub fn multi_index_map(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
         _ => abort_call_site!("MultiIndexMap only supports structs as elements"),
     };
 
+    // Extract the struct attrs for extra fileds from func
+    let extra_fields_ivs = input.vis.clone();
+    let extra_fileds: Vec<Field> = (&input.attrs)
+        .iter()
+        .map(|e| IntoExtraFiled::into_extra_filed(e, extra_fields_ivs.clone()))
+        .filter_map(|e| e.unwrap())
+        .collect();
     // Verify the struct fields are named fields, otherwise throw an error as we do not support Unnamed of Unit structs.
     let named_fields = match fields {
         syn::Fields::Named(f) => f,
@@ -25,16 +35,23 @@ pub fn multi_index_map(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
 
     // Filter out all the fields that do not have a multi_index attribute, so we can ignore the non-indexed fields.
     let fields_to_index = || {
-        named_fields.named.iter().filter(|f| {
-            f.attrs.first().is_some() && f.attrs.first().unwrap().path.is_ident("multi_index")
-        })
+        named_fields
+            .named
+            .iter()
+            .filter(|f| {
+                f.attrs.first().is_some() && f.attrs.first().unwrap().path.is_ident("multi_index")
+            })
+            .map(|e| (false, e))
+            .chain(extra_fileds.iter().map(|e| (true, e)))
     };
 
     // For each indexed field generate a TokenStream representing the lookup table for that field
     // Each lookup table maps it's index to a position in the backing storage,
     // or multiple positions in the backing storage in the non-unique indexes.
     let lookup_table_fields = fields_to_index().map(|f| {
-        let index_name = format_ident!("_{}_index", f.ident.as_ref().unwrap());
+        let (_, f) = f;
+        eprintln!("{}", f.to_token_stream());
+        let index_name: proc_macro2::Ident = format_ident!("_{}_index", f.ident.as_ref().unwrap());
         let ty = &f.ty;
 
         let (ordering, uniqueness) = get_index_kind(f).unwrap_or_else(|| {
@@ -48,16 +65,16 @@ pub fn multi_index_map(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
                 },
                 Ordering::Ordered => quote! {
                     #index_name: std::collections::BTreeMap<#ty, usize>,
-                }
-            }
+                },
+            },
             Uniqueness::NonUnique => match ordering {
                 Ordering::Hashed => quote! {
                     #index_name: rustc_hash::FxHashMap<#ty, Vec<usize>>,
                 },
                 Ordering::Ordered => quote! {
                     #index_name: std::collections::BTreeMap<#ty, Vec<usize>>,
-                }
-            }
+                },
+            },
         }
     });
 
@@ -66,22 +83,26 @@ pub fn multi_index_map(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
     // creating a new Vec if necessary.
     let inserts: Vec<proc_macro2::TokenStream> = fields_to_index()
         .map(|f| {
+            let (is_extra_field,f) = f;
             let field_name = f.ident.as_ref().unwrap();
             let field_name_string = field_name.to_string();
             let index_name = format_ident!("_{}_index", field_name);
             let (_ordering, uniqueness) = get_index_kind(f).unwrap_or_else(|| {
                 abort_call_site!("Attributes must be in the style #[multi_index(hashed_unique)]")
             });
+            let field_name = if is_extra_field {
+                quote!(#field_name())
+            } else {quote!(#field_name)};
 
             match uniqueness {
-                Uniqueness::Unique => quote! { 
+                Uniqueness::Unique => quote! {
                     let orig_elem_idx = self.#index_name.insert(elem.#field_name.clone(), idx);
                     if orig_elem_idx.is_some() {
                         panic!("Unable to insert element, uniqueness constraint violated on field '{}'", #field_name_string);
                     }
                 },
                 Uniqueness::NonUnique => quote! {
-                    self.#index_name.entry(elem.#field_name.clone()).or_insert(Vec::with_capacity(1)).push(idx); 
+                    self.#index_name.entry(elem.#field_name.clone()).or_insert(Vec::with_capacity(1)).push(idx);
                 },
             }
         })
@@ -90,6 +111,7 @@ pub fn multi_index_map(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
     // For each indexed field generate a TokenStream representing the remove from that field's lookup table.
     let removes: Vec<proc_macro2::TokenStream> = fields_to_index()
         .map(|f| {
+            let (is_extra_field,f) = f;
             let field_name = f.ident.as_ref().unwrap();
             let index_name = format_ident!("_{}_index", field_name);
             let field_name_string = field_name.to_string();
@@ -97,6 +119,9 @@ pub fn multi_index_map(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
             let (_ordering, uniqueness) = get_index_kind(f).unwrap_or_else(|| {
                 abort_call_site!("Attributes must be in the style #[multi_index(hashed_unique)]")
             });
+            let field_name = if is_extra_field {
+                quote!(#field_name())
+            } else {quote!(#field_name)};
 
             match uniqueness {
                 Uniqueness::Unique => quote! {
@@ -119,9 +144,9 @@ pub fn multi_index_map(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
         })
         .collect();
 
-
     // For each indexed field generate a TokenStream representing the combined remove and insert from that field's lookup table.
     let modifies: Vec<proc_macro2::TokenStream> = fields_to_index().map(|f| {
+        let (is_extra_field,f) = f;
         let field_name = f.ident.as_ref().unwrap();
         let field_name_string = field_name.to_string();
         let index_name = format_ident!("_{}_index", field_name);
@@ -129,6 +154,9 @@ pub fn multi_index_map(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
         let (_ordering, uniqueness) = get_index_kind(f).unwrap_or_else(|| {
             abort_call_site!("Attributes must be in the style #[multi_index(hashed_unique)]")
         });
+        let field_name = if is_extra_field {
+            quote!(#field_name())
+        } else {quote!(#field_name)};
 
         match uniqueness {
             Uniqueness::Unique => quote! {
@@ -142,17 +170,18 @@ pub fn multi_index_map(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
                 let idxs = self.#index_name.get_mut(&elem_orig.#field_name).expect(#error_msg);
                 let pos = idxs.iter().position(|x| *x == idx).expect(#error_msg);
                 idxs.remove(pos);
-                self.#index_name.entry(elem.#field_name.clone()).or_insert(Vec::with_capacity(1)).push(idx); 
+                self.#index_name.entry(elem.#field_name.clone()).or_insert(Vec::with_capacity(1)).push(idx);
             },
         }
     }).collect();
 
     let clears: Vec<proc_macro2::TokenStream> = fields_to_index()
         .map(|f| {
+            let (_, f) = f;
             let field_name = f.ident.as_ref().unwrap();
             let index_name = format_ident!("_{}_index", field_name);
-            
-            quote!{
+
+            quote! {
                 self.#index_name.clear();
             }
         })
@@ -165,6 +194,7 @@ pub fn multi_index_map(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
 
     // For each indexed field generate a TokenStream representing all the accessors for the underlying storage via that field's lookup table.
     let accessors = fields_to_index().map(|f| {
+        let (_,f) = f;
         let field_name = f.ident.as_ref().unwrap();
         let field_vis = &f.vis;
         let index_name = format_ident!("_{}_index", field_name);
@@ -243,7 +273,7 @@ pub fn multi_index_map(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
                     } else {
                         Vec::new()
                     }
-                }  
+                }
             },
         };
 
@@ -256,9 +286,9 @@ pub fn multi_index_map(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
                     let elem = &mut self._store[idx];
                     let elem_orig = elem.clone();
                     f(elem);
-    
+
                     #(#modifies)*
-    
+
                     Some(elem)
                 }
             },
@@ -288,6 +318,7 @@ pub fn multi_index_map(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
     // For each indexed field generate a TokenStream representing the Iterator over the backing storage via that field,
     // such that the elements are accessed in an order defined by the index rather than the backing storage.
     let iterators = fields_to_index().map(|f| {
+        let (_,f) = f;
         let field_name = f.ident.as_ref().unwrap();
         let field_vis = &f.vis;
         let field_name_string = field_name.to_string();
@@ -407,7 +438,7 @@ pub fn multi_index_map(input: proc_macro::TokenStream) -> proc_macro::TokenStrea
         }
 
         #(#iterators)*
-        
+
     };
 
     // Hand the output tokens back to the compiler.
